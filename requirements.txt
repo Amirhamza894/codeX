@@ -2,4 +2,5 @@ yt-dlp
 ffmpeg-python
 openai
 whisper
+ffmpeg
 
