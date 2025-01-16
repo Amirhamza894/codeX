@@ -3,21 +3,26 @@ import re
 import yt_dlp
 import shutil
 import instaloader
-import requests
-from bs4 import BeautifulSoup
-
-
+from pathlib import Path
 
 class VideoDownloader:
     def __init__(self, output_dir='data/videos/'):
         self.output_dir = output_dir
-        os.makedirs(output_dir, exist_ok=True)
+        os.makedirs(self.output_dir, exist_ok=True)
         self.check_ffmpeg()
 
     def check_ffmpeg(self):
         """Check if FFmpeg is installed."""
         if not shutil.which("ffmpeg"):
             raise EnvironmentError("FFmpeg is not installed. Please install it to enable video and audio merging.")
+
+    def cleanup_temp_files(self, target_dir):
+        """Remove any temporary .part files."""
+        for file_name in os.listdir(target_dir):
+            if file_name.endswith(".part"):
+                part_file_path = os.path.join(target_dir, file_name)
+                print(f"Removing temporary file: {part_file_path}")
+                os.remove(part_file_path)
 
     def detect_platform(self, input_text):
         """Detect the platform based on the input text."""
@@ -33,97 +38,155 @@ class VideoDownloader:
                 return platform
 
         return None  # Ambiguous input
-    
-    def fetch_filtered_videos(self, url, platform, filter_condition=None):
-        """Fetch and download videos that meet the filter condition."""
+
+    def rename_files_and_folder(self, target_dir):
+        """Rename the folder and files inside it by removing spaces."""
+        if not os.path.exists(target_dir):
+            print(f"Error: The directory {target_dir} does not exist.")
+            return
+
+        parent_dir = os.path.dirname(target_dir)
+        folder_name = os.path.basename(target_dir)
+        new_folder_name = folder_name.replace(" ", "_")  # Replace spaces with underscores
+        new_target_dir = os.path.join(parent_dir, new_folder_name)
+
+        if target_dir != new_target_dir:
+            os.rename(target_dir, new_target_dir)
+            print(f"Renamed folder: {target_dir} -> {new_target_dir}")
+            target_dir = new_target_dir
+
+        for file_name in os.listdir(target_dir):
+            old_file_path = os.path.join(target_dir, file_name)
+            if os.path.isfile(old_file_path):
+                new_file_name = file_name.replace(" ", "_")
+                new_file_path = os.path.join(target_dir, new_file_name)
+
+                if old_file_path != new_file_path:
+                    os.rename(old_file_path, new_file_path)
+                    print(f"Renamed file: {old_file_path} -> {new_file_path}")
+
+    def fetch_filtered_videos(self, url, platform):
+        """Fetch and download videos from a given platform."""
+        platform_folder = os.path.join(self.output_dir, platform)
+        os.makedirs(platform_folder, exist_ok=True)
+
         output_dir_map = {
-            "youtube": 'youtube/%(uploader)s/%(title)s.%(ext)s',
-            "tiktok": 'tiktok/%(uploader)s/%(title)s.%(ext)s',
-            "instagram": 'instagram/%(uploader)s/%(title)s.%(ext)s',
-            "facebook": 'facebook/%(uploader)s/%(title)s.%(ext)s',
+            "youtube": '%(uploader)s/%(title)s.%(ext)s',
+            "tiktok": '%(uploader)s/%(title)s.%(ext)s',
+            "instagram": '%(uploader)s/%(title)s.%(ext)s',
+            "facebook": '%(uploader)s/%(title)s.%(ext)s',
         }
+
+        uploader_name = None  # Initialize variable to store uploader name
+
+        def hook(d):
+            """Hook to capture metadata during download."""
+            nonlocal uploader_name
+            if d['status'] == 'finished':
+                # Extract uploader name from metadata
+                uploader_name = d.get('info_dict', {}).get('uploader', None)
+                print(f"Download finished. Uploader: {uploader_name}")
+
         options = {
-            'outtmpl': os.path.join(self.output_dir, output_dir_map[platform]),
+            'outtmpl': os.path.join(platform_folder, output_dir_map[platform]),
             'format': 'bestvideo+bestaudio/best',
             'merge_output_format': 'mp4',
-            'postprocessors': [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}],
-            'noplaylist': True,  # Avoid downloading playlists
+            'noplaylist': True,
+            'progress_hooks': [hook],  # Attach the hook
         }
-        if filter_condition:
-            options['match_filter'] = filter_condition
 
         try:
             with yt_dlp.YoutubeDL(options) as ydl:
-                print(f"Fetching and downloading videos from {platform}: {url}")
+                print(f"Downloading videos from {platform}: {url}")
                 ydl.download([url])
+
+            if uploader_name:
+                # Construct the uploader folder path
+                uploader_folder = os.path.join(platform_folder, uploader_name)
+                print(f"Cleaning and renaming files in folder: {uploader_folder}")
+                self.cleanup_temp_files(uploader_folder)
+                self.rename_files_and_folder(uploader_folder)
+            else:
+                print("Unable to determine uploader name.")
+
         except Exception as e:
             print(f"Error downloading from {url}: {e}")
-    
-    def fetch_facebook_reels(self, username):
-        """Fetch all Reels from a Facebook user's profile."""
-        base_url = f"https://www.facebook.com/{username}/reels"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.36'
-        }
-        try:
-            # Make a request to the Facebook page
-            response = requests.get(base_url, headers=headers)
-            if response.status_code != 200:
-                print("Error fetching Facebook page")
-                return []
 
-            # Parse the page content
-            soup = BeautifulSoup(response.text, 'html.parser')
+    def process_input(self, input_text):
+        """Process user input to determine platform and action."""
+        platform = self.detect_platform(input_text)
 
-            # Find all video links (reels)
-            video_links = []
-            for link in soup.find_all('a', href=True):
-                href = link['href']
-                if '/reel/' in href:
-                    full_url = f"https://www.facebook.com{href}"
-                    video_links.append(full_url)
+        if platform:
+            if platform == "youtube" and 'youtube.com/shorts/' in input_text:
+                print(f"Downloading video from YouTube Shorts: {input_text}")
+                self.fetch_filtered_videos(input_text, platform)
+                return
 
-            return video_links
-        except Exception as e:
-            print(f"Error fetching reels for {username}: {e}")
-            return []
-    
+            print(f"Direct video link detected. Downloading from {platform}.")
+            self.fetch_filtered_videos(input_text, platform)
+        else:
+            print("Ambiguous input detected. Is this a username?")
+            print("Select the platform for the username:")
+            print("1. YouTube (Shorts Only)\n2. TikTok\n3. Instagram (Reels Only)\n4. Facebook")
+            choice = input("Enter the number corresponding to the platform: ").strip()
+
+            platform_map = {
+                "1": "youtube",
+                "2": "tiktok",
+                "3": "instagram",
+                "4": "facebook",
+            }
+
+            platform = platform_map.get(choice)
+            if not platform:
+                print("Invalid choice. Unable to determine platform.")
+                return
+
+            if platform == "youtube":
+                constructed_url = f"https://www.youtube.com/@{input_text}/shorts"
+                print(f"Downloading videos from YouTube Shorts: {constructed_url}")
+                self.fetch_filtered_videos(constructed_url, platform)
+            elif platform == "instagram":
+                self.fetch_instagram_reels(input_text)
+            elif platform == "tiktok":
+                self.fetch_tiktok_videos(input_text)
+            elif platform == "facebook":
+                self.fetch_facebook_videos(input_text)
+
     def fetch_instagram_reels(self, username):
-        """Fetch and download all Reels for an Instagram account into the project directory."""
-        # Define the target directory
-        target_dir = os.path.join(self.output_dir, f"instagram/{username}")
+        """Fetch and download all Reels for an Instagram account."""
+        target_dir = os.path.join(self.output_dir, f"instagram")  # Specify the folder path
+        print(f"Target directory for Instagram reels: {target_dir}")
         os.makedirs(target_dir, exist_ok=True)
 
-        loader = instaloader.Instaloader(save_metadata=False, download_videos=True)
-        loader.download_video_thumbnails = False  # Skip downloading thumbnails
+        # Check if the folder exists before downloading
+        if not os.path.exists(target_dir):
+            print(f"Directory {target_dir} does not exist. Please create it manually.")
+            return
+
+           # Change the current working directory to the target directory
+        os.chdir(target_dir)
+        print(f"Changed working directory to: {os.getcwd()}")
+
+        loader = instaloader.Instaloader(save_metadata=False, download_videos=True)  # Allow download of videos
+        loader.download_video_thumbnails = False  # Disable thumbnail downloads
 
         try:
             print(f"Fetching reels from Instagram account: {username}")
-        
-            # Get profile data
             profile = instaloader.Profile.from_username(loader.context, username)
-        
-            # Loop through all posts and download only Reels
+
+            # Iterate through posts and download videos
             for post in profile.get_posts():
                 if post.is_video and post.typename == 'GraphVideo':
                     print(f"Downloading reel: {post.shortcode}")
-                    video_filename = os.path.join(target_dir, f"{post.shortcode}.mp4")
-                
-                    # Custom download logic: Skip directory creation
-                    with loader.context.get_anonymous_session() as session:
-                        response = session.get(post.url)
-                        if response.ok:
-                            with open(video_filename, "wb") as video_file:
-                                video_file.write(response.content)
-        
-            # Remove unwanted files (if any)
-            for file in os.listdir(target_dir):
-                if not file.endswith(".mp4"):
-                    os.remove(os.path.join(target_dir, file))
+                    # Download the post directly to the existing target directory
+                    loader.download_post(post, username)
 
-            print(f"Download completed successfully! Reels saved in {target_dir}")
+            self.rename_files_and_folder(target_dir)  # Optional: renaming to clean up files
         except Exception as e:
             print(f"Error fetching reels for {username}: {e}")
+
+
 
     def fetch_tiktok_videos(self, username):
         """Fetch and download all TikTok videos for a user."""
@@ -133,9 +196,9 @@ class VideoDownloader:
         tiktok_url = f"https://www.tiktok.com/@{username}"
         options = {
             'outtmpl': os.path.join(target_dir, '%(id)s.%(ext)s'),
-            'format': 'best',  # Download the best available format
-            'noplaylist': True,  # Avoid downloading playlists if there are any
-            'merge_output_format': 'mp4',  # Ensure the output is in mp4 format
+            'format': 'best',
+            'noplaylist': True,
+            'merge_output_format': 'mp4',
             'postprocessors': [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}],
         }
 
@@ -144,61 +207,33 @@ class VideoDownloader:
                 print(f"Fetching and downloading videos from TikTok user: {username}")
                 ydl.download([tiktok_url])
 
-            print(f"Download completed successfully! Videos saved in {target_dir}")
+            self.rename_files_and_folder(target_dir)
         except Exception as e:
             print(f"Error fetching TikTok videos for {username}: {e}")
-        # try:
-        #     print(f"Fetching videos from TikTok user: {username}")
-        #     loader.download([user_url])
 
-        #     print(f"Download completed successfully! Videos saved in {target_dir}")
-        # except Exception as e:
-        #     print(f"Error fetching TikTok videos for {username}: {e}")
+    def fetch_facebook_videos(self, username):
+        """Fetch and download all Facebook videos for a user."""
+        target_dir = os.path.join(self.output_dir, f"facebook/{username}")
+        os.makedirs(target_dir, exist_ok=True)
 
-
-    def process_input(self, input_text):
-        """Process user input to determine if it's a URL or username."""
-        platform = self.detect_platform(input_text)
-
-        if platform:
-            # Direct video link or playlist
-            print(f"Direct video link detected. Downloading from {platform}.")
-            self.fetch_filtered_videos(input_text, platform)
-        else:
-            # Ambiguous input, treat it as a username
-            print("Ambiguous input detected. Is this a username?")
-            print("Select the platform for the username:")
-            print("1. YouTube (Shorts Only)\n2. TikTok\n3. Instagram (Reels Only)\n4. Facebook")
-            choice = input("Enter the number corresponding to the platform: ").strip()
-
-        platform_map = {
-            "1": "youtube",
-            "2": "tiktok",
-            "3": "instagram",
-            "4": "facebook",
+        facebook_url = f"https://www.facebook.com/{username}/videos"
+        options = {
+            'outtmpl': os.path.join(target_dir, '%(id)s.%(ext)s'),
+            'format': 'best',
+            'noplaylist': True,
+            'merge_output_format': 'mp4',
+            'postprocessors': [{'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'}],
         }
-        platform = platform_map.get(choice)
 
-        if platform == "instagram":
-            # Fetch and download all Instagram Reels
-            self.fetch_instagram_reels(input_text)
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                print(f"Fetching and downloading videos from Facebook user: {username}")
+                ydl.download([facebook_url])
 
-        elif platform == "tiktok":
-            # Fetch and download all TikTok videos
-            self.fetch_tiktok_videos(input_text)
+            self.rename_files_and_folder(target_dir)
+        except Exception as e:
+            print(f"Error fetching Facebook videos for {username}: {e}")
 
-        elif platform:
-            platform_urls = {
-                "youtube": f"https://www.youtube.com/@{input_text}/shorts",  # Constructed URL for YouTube Shorts
-                "tiktok": f"https://www.tiktok.com/@{input_text}",
-                "facebook": f"https://www.facebook.com/{input_text}/reels",  # Constructed URL for Facebook Reels
-            }
-
-            # Fetch and download videos (no need for filter for YouTube Shorts)
-            print(f"Downloading videos from {platform}: {platform_urls[platform]}")
-            self.fetch_filtered_videos(platform_urls[platform], platform)
-        else:
-            print("Invalid choice. Unable to determine platform.")
 
 if __name__ == "__main__":
     downloader = VideoDownloader()

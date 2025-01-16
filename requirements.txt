@@ -3,4 +3,10 @@ ffmpeg-python
 openai
 whisper
 ffmpeg
-
+scipy
+moviepy==1.0.3
+numpy
+Pillow==9.5.0  # Compatible version with MoviePy 1.x
+decorator
+imageio==2.9.0  # Compatible with MoviePy 1.x
+tqdm==4.64.1  # For progress bars
